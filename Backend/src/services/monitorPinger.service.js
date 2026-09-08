@@ -1,6 +1,7 @@
 import prisma from "../config/database.js";
 
 const PING_INTERVAL_MS = 10000;
+const REQUEST_TIMEOUT_MS = 5000;
 
 let isChecking = false;
 
@@ -21,24 +22,32 @@ const markMonitorUp = async (monitorId) => {
     });
 };
 
-const markMonitorFailed = async (monitorId) => {
+const markMonitorFailed = async (monitor) => {
+    const failureCount = monitor.failureCount + 1;
+    const status = failureCount >= 3 ? "DOWN" : "DEGRADED";
+
     await prisma.monitor.update({
         where: {
-            id: monitorId
+            id: monitor.id
         },
         data: {
-            status: "DOWN",
-            failureCount: {
-                increment: 1
-            },
+            status,
+            failureCount,
             lastChecked: new Date()
         }
     });
+
+    return { status, failureCount };
 };
 
 const checkMonitor = async (monitor) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
     try {
-        const response = await fetch(monitor.url);
+        const response = await fetch(monitor.url, {
+            signal: controller.signal
+        });
 
         if (isSuccessfulStatus(response.status)) {
             await markMonitorUp(monitor.id);
@@ -46,11 +55,23 @@ const checkMonitor = async (monitor) => {
             return;
         }
 
-        await markMonitorFailed(monitor.id);
-        console.log(`[pinger] ${monitor.name} is DOWN (${response.status})`);
+        const result = await markMonitorFailed(monitor);
+        console.log(
+            `[pinger] ${monitor.name} is ${result.status} ` +
+            `(failure ${result.failureCount}, HTTP ${response.status})`
+        );
     } catch (error) {
-        await markMonitorFailed(monitor.id);
-        console.log(`[pinger] ${monitor.name} is DOWN (${error.message})`);
+        const result = await markMonitorFailed(monitor);
+        const reason = error.name === "AbortError"
+            ? `timeout after ${REQUEST_TIMEOUT_MS / 1000}s`
+            : error.message;
+
+        console.log(
+            `[pinger] ${monitor.name} is ${result.status} ` +
+            `(failure ${result.failureCount}, ${reason})`
+        );
+    } finally {
+        clearTimeout(timeoutId);
     }
 };
 
@@ -67,7 +88,8 @@ export const runMonitorChecks = async () => {
             select: {
                 id: true,
                 name: true,
-                url: true
+                url: true,
+                failureCount: true
             }
         });
 
