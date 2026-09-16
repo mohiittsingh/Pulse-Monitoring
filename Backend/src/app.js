@@ -1,5 +1,6 @@
 import express from "express";
 import monitorRoutes from "./routes/monitor.routes.js";
+import "dotenv/config";
 import { startMonitorPinger } from "./services/monitorPinger.service.js";
 
 const app = express();
